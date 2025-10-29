@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Табло аэропорта Хабаровск (KHV) — Вылеты/Прилёты</title>
+<style>
+  :root { --bg:#0f172a; --card:#111827; --text:#e5e7eb; --muted:#9ca3af; --accent:#38bdf8; --ok:#10b981; --warn:#f59e0b; --bad:#ef4444; }
+  html,body{height:100%}
+  body{margin:0;background:linear-gradient(180deg,#0b1220,#0f172a 30%,#0b1220);color:var(--text);font-family:system-ui,Segoe UI,Roboto,Inter,Arial,sans-serif}
+  .wrap{max-width:1100px;margin:24px auto;padding:0 16px}
+  header{display:flex;gap:12px;align-items:center;justify-content:space-between;margin-bottom:16px}
+  .title{font-weight:800;letter-spacing:.3px;font-size:clamp(20px,4vw,28px)}
+  .pill{background:rgba(56,189,248,.15);color:var(--accent);padding:6px 10px;border-radius:999px;font-size:12px}
+  .tabs{display:flex;gap:8px;margin:12px 0 16px}
+  .tab{cursor:pointer;background:#0b1220;border:1px solid #1f2937;color:var(--muted);padding:10px 14px;border-radius:12px;font-weight:600}
+  .tab.active{color:#fff;border-color:var(--accent);box-shadow:0 0 0 2px rgba(56,189,248,.15) inset}
+  .card{background:var(--card);border:1px solid #1f2937;border-radius:16px;overflow:hidden}
+  .toolbar{display:flex;gap:8px;align-items:center;justify-content:space-between;padding:12px;border-bottom:1px solid #1f2937}
+  .muted{color:var(--muted);font-size:12px}
+  .btn{cursor:pointer;background:#0b1220;border:1px solid #1f2937;color:#fff;padding:8px 12px;border-radius:10px}
+  .btn:hover{border-color:var(--accent)}
+  table{width:100%;border-collapse:collapse}
+  th,td{padding:12px 10px;border-bottom:1px solid #1f2937;text-align:left;font-size:14px}
+  th{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+  tr:hover{background:#0c1426}
+  .status{font-weight:700}
+  .status.ok{color:var(--ok)}
+  .status.warn{color:var(--warn)}
+  .status.bad{color:var(--bad)}
+  .empty{padding:24px;text-align:center;color:var(--muted)}
+  footer{margin-top:16px;font-size:12px;color:var(--muted);display:flex;justify-content:space-between;gap:8px}
+  code{background:#0b1220;border:1px solid #1f2937;padding:2px 6px;border-radius:6px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="title">Аэропорт Хабаровск (KHV) — Онлайн-табло</div>
+    <div class="pill">Автообновление</div>
+  </header>
+
+  <div class="tabs">
+    <button class="tab active" data-kind="departures">Вылеты</button>
+    <button class="tab" data-kind="arrivals">Прилёты</button>
+  </div>
+
+  <div class="card">
+    <div class="toolbar">
+      <div class="muted">Источник: <strong>khv.aero</strong> (через защищённый прокси)</div>
+      <div><button id="refresh" class="btn">Обновить</button></div>
+    </div>
+    <div id="table-wrap">
+      <table id="board">
+        <thead>
+          <tr>
+            <th>Время</th>
+            <th>Рейс</th>
+            <th>Маршрут</th>
+            <th>Авиакомпания</th>
+            <th>Статус</th>
+          </tr>
+        </thead>
+        <tbody id="rows">
+          <tr><td class="empty" colspan="5">Загрузка…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <footer>
+    <div>Обновится через <span id="ttl">—</span> сек.</div>
+    <div>Если на <strong>khv.aero</strong> изменятся заголовки колонок, обновите соответствия в <code>extractFlightsKHV()</code>.</div>
+  </footer>
+</div>
+
+<script>
+  // ↘ Укажите ваш Worker-прокси:
+  // Ожидаемые роуты:
+  //   /api/khv/departures  -> возвращает { ok:true, html:"<весь HTML khv.aero/online (вкладка ВЫЛЕТ)>" }
+  //   /api/khv/arrivals    -> возвращает то же, но для ПРИЛЁТ
+  const PROXY_BASE = "https://yks-proxy.georgiyaok.workers.dev"; // замените при необходимости
+  const REFRESH_EVERY_SEC = 60;
+
+  const tabs = document.querySelectorAll(".tab");
+  const rowsEl = document.getElementById("rows");
+  const ttlEl = document.getElementById("ttl");
+  const refreshBtn = document.getElementById("refresh");
+
+  let currentKind = "departures";
+  let timer = null, ttl = REFRESH_EVERY_SEC;
+
+  tabs.forEach(t => t.addEventListener("click", () => {
+    tabs.forEach(x => x.classList.remove("active"));
+    t.classList.add("active");
+    currentKind = t.dataset.kind;
+    loadBoard();
+  }));
+  refreshBtn.addEventListener("click", loadBoard);
+
+  function tick(){ ttl--; ttlEl.textContent = ttl; if (ttl<=0) loadBoard(); }
+  function startTimer(){ clearInterval(timer); ttl=REFRESH_EVERY_SEC; ttlEl.textContent=ttl; timer=setInterval(tick,1000); }
+
+  async function loadBoard(){
+    startTimer();
+    rowsEl.innerHTML = `<tr><td class="empty" colspan="5">Загрузка ${currentKind==='departures'?'вылетов':'прилётов'}…</td></tr>`;
+    try{
+      const r = await fetch(`${PROXY_BASE}/api/khv/${currentKind}`);
+      const data = await r.json();
+      if(!data.ok) throw new Error(data.error || "proxy error");
+      const flights = extractFlightsKHV(data.html, currentKind) || [];
+      if(!flights.length){
+        rowsEl.innerHTML = `<tr><td class="empty" colspan="5">Нет данных или изменилась структура сайта. Нажмите «Обновить».</td></tr>`;
+        return;
+      }
+      rowsEl.innerHTML = flights.map(f => `
+        <tr>
+          <td>${esc(f.time)}</td>
+          <td>${esc(f.flight)}</td>
+          <td>${esc(f.route)}</td>
+          <td>${esc(f.airline)}</td>
+          <td class="status ${statusClass(f.status)}">${esc(f.status)}</td>
+        </tr>
+      `).join("");
+    }catch(e){
+      rowsEl.innerHTML = `<tr><td class="empty" colspan="5">Ошибка загрузки: ${esc(String(e))}</td></tr>`;
+    }
+  }
+
+  /**
+   * Универсальный парсер khv.aero:
+   * 1) Находит первую строку <tr> с заголовками.
+   * 2) Строит соответствия индексов (Авиакомпания/Рейс/Направление/Время/Статус).
+   * 3) Собирает все <tr> с >= нужным числом <td>.
+   * Работает для вкладок ВЫЛЕТ/ПРИЛЁТ (разница только в заголовке "Время вылета/прилёта").
+   */
+  function extractFlightsKHV(html, kind){
+    const doc = new DOMParser().parseFromString(html, "text/html");
+
+    // Собираем все строки таблиц на странице
+    const allRows = Array.from(doc.querySelectorAll("tr"));
+    if(!allRows.length) return [];
+
+    // Находим строку заголовка с нужными столбцами
+    const headerRow = allRows.find(tr => {
+      const ths = Array.from(tr.querySelectorAll("th,td")).map(x => norm(x.textContent));
+      return ths.some(t => /авиакомпан/i.test(t)) &&
+             ths.some(t => /рейс/i.test(t)) &&
+             ths.some(t => /направ/i.test(t)) &&
+             ths.some(t => /(время|вылет|прилет|прилёт)/i.test(t)) &&
+             ths.some(t => /статус/i.test(t));
+    });
+    if(!headerRow) return [];
+
+    const headers = Array.from(headerRow.querySelectorAll("th,td")).map(x => norm(x.textContent));
+    const idx = {
+      airline: headers.findIndex(t => /авиакомпан/i.test(t)),
+      flight:  headers.findIndex(t => /рейс/i.test(t)),
+      route:   headers.findIndex(t => /направ/i.test(t)),
+      time:    headers.findIndex(t => /(время|вылет|прилет|прилёт)/i.test(t)),
+      status:  headers.findIndex(t => /статус/i.test(t)),
+    };
+
+    const headerTable = headerRow.closest("table");
+    const bodyRows = headerTable
+      ? Array.from(headerTable.querySelectorAll("tr")).slice(1) // после заголовков
+      : allRows.slice(allRows.indexOf(headerRow)+1);
+
+    const flights = [];
+    bodyRows.forEach(tr => {
+      const tds = Array.from(tr.querySelectorAll("td"));
+      if (tds.length < 4) return; // пропуск пустых/служебных
+      const cell = i => (i>=0 && i<tds.length) ? norm(tds[i].textContent) : "";
+      const airline = cell(idx.airline);
+      const flight  = cell(idx.flight).replace(/\s+/g, ""); // SU 1713 → SU1713
+      const route   = cell(idx.route);
+      const time    = cell(idx.time);
+      const status  = cell(idx.status);
+
+      // минимальный фильтр валидности
+      if (flight && route && (time || status)) {
+        flights.push({
+          time:   time,
+          flight: flight,
+          route:  route,
+          airline: airline,
+          status: status
+        });
+      }
+    });
+
+    return flights;
+  }
+
+  // Классы статусов (учтены формулировки khv.aero)
+  function statusClass(s){
+    const t=(s||"").toLowerCase();
+    if (/(прибыл|прилетел|вылетел|landed|departed|по расписанию|on time)/.test(t)) return "ok";
+    if (/(посадка|задерж|boarding|delay)/.test(t)) return "warn";
+    if (/(отмен|cancel)/.test(t)) return "bad";
+    return "";
+  }
+
+  function norm(s){ return (s||"").replace(/\s+/g," ").trim(); }
+  function esc(s){ return (s||"").replace(/[&<>"']/g,c=>({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c])); }
+
+  // Первый запуск
+  loadBoard();
+</script>
+</body>
+</html>
