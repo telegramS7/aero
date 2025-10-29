@@ -75,11 +75,9 @@
 </div>
 
 <script>
-  // ↘ Укажите ваш Worker-прокси:
-  // Ожидаемые роуты:
-  //   /api/khv/departures  -> возвращает { ok:true, html:"<весь HTML khv.aero/online (вкладка ВЫЛЕТ)>" }
-  //   /api/khv/arrivals    -> возвращает то же, но для ПРИЛЁТ
-  const PROXY_BASE = "https://khv-proxy.435662.workers.dev"; // замените при необходимости
+  // ВАШ адрес воркера/прокси:
+  const PROXY_BASE = "https://khv-proxy.435662.workers.dev"; // ← замените
+  // Период автообновления:
   const REFRESH_EVERY_SEC = 60;
 
   const tabs = document.querySelectorAll(".tab");
@@ -96,21 +94,33 @@
     currentKind = t.dataset.kind;
     loadBoard();
   }));
+
   refreshBtn.addEventListener("click", loadBoard);
 
-  function tick(){ ttl--; ttlEl.textContent = ttl; if (ttl<=0) loadBoard(); }
-  function startTimer(){ clearInterval(timer); ttl=REFRESH_EVERY_SEC; ttlEl.textContent=ttl; timer=setInterval(tick,1000); }
+  function tick() {
+    ttl--;
+    ttlEl.textContent = ttl;
+    if (ttl <= 0) {
+      loadBoard();
+    }
+  }
+  function startTimer() {
+    clearInterval(timer);
+    ttl = REFRESH_EVERY_SEC;
+    ttlEl.textContent = ttl;
+    timer = setInterval(tick, 1000);
+  }
 
-  async function loadBoard(){
+  async function loadBoard() {
     startTimer();
     rowsEl.innerHTML = `<tr><td class="empty" colspan="5">Загрузка ${currentKind==='departures'?'вылетов':'прилётов'}…</td></tr>`;
-    try{
-      const r = await fetch(`${PROXY_BASE}/api/khv/${currentKind}`);
+    try {
+      const r = await fetch(`${PROXY_BASE}/api/${currentKind}`);
       const data = await r.json();
-      if(!data.ok) throw new Error(data.error || "proxy error");
-      const flights = extractFlightsKHV(data.html, currentKind) || [];
-      if(!flights.length){
-        rowsEl.innerHTML = `<tr><td class="empty" colspan="5">Нет данных или изменилась структура сайта. Нажмите «Обновить».</td></tr>`;
+      if (!data.ok) throw new Error(data.error || "proxy error");
+      const flights = extractFlights(data.html) || [];
+      if (!flights.length) {
+        rowsEl.innerHTML = `<tr><td class="empty" colspan="5">Нет данных или изменился сайт. Попробуйте «Обновить».</td></tr>`;
         return;
       }
       rowsEl.innerHTML = flights.map(f => `
@@ -122,87 +132,86 @@
           <td class="status ${statusClass(f.status)}">${esc(f.status)}</td>
         </tr>
       `).join("");
-    }catch(e){
+    } catch (e) {
       rowsEl.innerHTML = `<tr><td class="empty" colspan="5">Ошибка загрузки: ${esc(String(e))}</td></tr>`;
     }
   }
 
-  /**
-   * Универсальный парсер khv.aero:
-   * 1) Находит первую строку <tr> с заголовками.
-   * 2) Строит соответствия индексов (Авиакомпания/Рейс/Направление/Время/Статус).
-   * 3) Собирает все <tr> с >= нужным числом <td>.
-   * Работает для вкладок ВЫЛЕТ/ПРИЛЁТ (разница только в заголовке "Время вылета/прилёта").
-   */
-  function extractFlightsKHV(html, kind){
+function extractFlights(html) {
     const doc = new DOMParser().parseFromString(html, "text/html");
-
-    // Собираем все строки таблиц на странице
-    const allRows = Array.from(doc.querySelectorAll("tr"));
-    if(!allRows.length) return [];
-
-    // Находим строку заголовка с нужными столбцами
-    const headerRow = allRows.find(tr => {
-      const ths = Array.from(tr.querySelectorAll("th,td")).map(x => norm(x.textContent));
-      return ths.some(t => /авиакомпан/i.test(t)) &&
-             ths.some(t => /рейс/i.test(t)) &&
-             ths.some(t => /направ/i.test(t)) &&
-             ths.some(t => /(время|вылет|прилет|прилёт)/i.test(t)) &&
-             ths.some(t => /статус/i.test(t));
-    });
-    if(!headerRow) return [];
-
-    const headers = Array.from(headerRow.querySelectorAll("th,td")).map(x => norm(x.textContent));
-    const idx = {
-      airline: headers.findIndex(t => /авиакомпан/i.test(t)),
-      flight:  headers.findIndex(t => /рейс/i.test(t)),
-      route:   headers.findIndex(t => /направ/i.test(t)),
-      time:    headers.findIndex(t => /(время|вылет|прилет|прилёт)/i.test(t)),
-      status:  headers.findIndex(t => /статус/i.test(t)),
-    };
-
-    const headerTable = headerRow.closest("table");
-    const bodyRows = headerTable
-      ? Array.from(headerTable.querySelectorAll("tr")).slice(1) // после заголовков
-      : allRows.slice(allRows.indexOf(headerRow)+1);
-
     const flights = [];
-    bodyRows.forEach(tr => {
-      const tds = Array.from(tr.querySelectorAll("td"));
-      if (tds.length < 4) return; // пропуск пустых/служебных
-      const cell = i => (i>=0 && i<tds.length) ? norm(tds[i].textContent) : "";
-      const airline = cell(idx.airline);
-      const flight  = cell(idx.flight).replace(/\s+/g, ""); // SU 1713 → SU1713
-      const route   = cell(idx.route);
-      const time    = cell(idx.time);
-      const status  = cell(idx.status);
 
-      // минимальный фильтр валидности
-      if (flight && route && (time || status)) {
-        flights.push({
-          time:   time,
-          flight: flight,
-          route:  route,
-          airline: airline,
-          status: status
-        });
-      }
+    // Селектор для всех строк рейсов в таблице.
+    // Они находятся внутри <ul> с классом scheduler-table__list, каждая строка - <li>.
+    const flightItems = doc.querySelectorAll('.scheduler-table__list > .scheduler-table__item');
+
+    flightItems.forEach(item => {
+        // Получаем краткое описание рейса (Summary)
+        const brief = item.querySelector('.scheduler-entry__brief');
+        if (!brief) return; // Пропустить, если нет основной информации
+
+        // Используем CSS-селекторы для извлечения данных из определенных ячеек
+        const timePlanEl = brief.querySelector('.scheduler-table-row__time--plan');
+        const flightEl = brief.querySelector('.scheduler-table-row__flight');
+        const companyEl = brief.querySelector('.scheduler-table-row__company');
+        const destinationEl = brief.querySelector('.scheduler-table-row__destination');
+        const timeActualEl = brief.querySelector('.scheduler-table-row__time--actual');
+        const statusEl = brief.querySelector('.scheduler-table-row__status .caption');
+
+        // Парсинг времени и даты
+        const time = timePlanEl ? timePlanEl.querySelector('.time .caption').textContent.trim() : '';
+        const date = timePlanEl ? timePlanEl.querySelector('.date .caption').textContent.trim() : '';
+
+        // Парсинг других полей
+        const flight = flightEl ? flightEl.textContent.trim() : '';
+        const route = destinationEl ? destinationEl.textContent.trim() : '';
+        
+        // Название авиакомпании из атрибута 'data-title'
+        const airline = companyEl ? companyEl.getAttribute('data-title') || '' : '';
+        
+        const status = statusEl ? statusEl.textContent.trim() : '';
+        
+        // Фактическое время - может быть пустым
+        const actualTime = timeActualEl ? timeActualEl.textContent.trim() : '';
+        
+        let fullTime;
+        if (actualTime) {
+            fullTime = `${time} ${date} • факт ${actualTime}`;
+        } else {
+            fullTime = `${time} ${date}`;
+        }
+
+        if (flight && route) {
+            flights.push({
+                time: fullTime,
+                flight: flight.replace(' ', ''), // Убираем пробел в номере рейса (R3 295 -> R3295)
+                route: route,
+                airline: airline,
+                status: status
+            });
+        }
     });
 
     return flights;
-  }
+}
 
-  // Классы статусов (учтены формулировки khv.aero)
+// чуть улучшим цвета статусов
+function statusClass(s){
+  const t=(s||"").toLowerCase();
+  if (/(прибыл|вылетел|landed|departed|on time)/.test(t)) return "ok";
+  if (/(посадка|boarding|задерж)/.test(t)) return "warn";
+  if (/(отмен)/.test(t)) return "bad";
+  return "";
+}
+
   function statusClass(s){
-    const t=(s||"").toLowerCase();
-    if (/(прибыл|прилетел|вылетел|landed|departed|по расписанию|on time)/.test(t)) return "ok";
-    if (/(посадка|задерж|boarding|delay)/.test(t)) return "warn";
+    const t = (s||"").toLowerCase();
+    if (/(прибыл|вылетел|landed|departed|по расписанию|on time)/.test(t)) return "ok";
+    if (/(задерж|delay)/.test(t)) return "warn";
     if (/(отмен|cancel)/.test(t)) return "bad";
     return "";
   }
-
-  function norm(s){ return (s||"").replace(/\s+/g," ").trim(); }
-  function esc(s){ return (s||"").replace(/[&<>"']/g,c=>({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c])); }
+  function esc(s){return (s||"").replace(/[&<>"']/g,c=>({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]))}
 
   // Первый запуск
   loadBoard();
